@@ -1,2 +1,526 @@
 // https://docs.google.com/spreadsheets/d/1oaL1lCacArOUJSYtl8kon3Ddq_rPIwx1Xqh-MLCTV8U/edit?gid=747217677#gid=747217677
 
+// 1oaL1lCacArOUJSYtl8kon3Ddq_rPIwx1Xqh-MLCTV8U shit id
+// https://script.google.com/macros/s/AKfycbyU-RipfUVKR9IpzrRdlKBFfFR0otKtxu_Xu95ZCWPyvJpRdud23jNgS6gpImltzvphNg/exec 
+
+// Google Apps Script Code for Real-Time Order Management Database
+// Copy this entire code to your Google Apps Script project
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    
+    switch(action) {
+      case 'syncData':
+        return handleSyncData(data);
+      case 'fetchUpdates':
+        return handleFetchUpdates(data);
+      case 'registerDevice':
+        return handleRegisterDevice(data);
+      case 'heartbeat':
+        return handleHeartbeat(data);
+      case 'deleteOrder':
+        return handleDeleteOrder(data);
+      case 'deleteOrderAdvanced':
+        return handleDeleteOrderAdvanced(data);
+      default:
+        return ContentService.createTextOutput(JSON.stringify({success: false, error: 'Unknown action'}));
+    }
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({success: false, error: error.toString()}));
+  }
+}
+
+function doGet(e) {
+  try {
+    const action = e.parameter.action;
+    const deviceId = e.parameter.deviceId;
+    const callback = e.parameter.callback;
+    
+    if (action === 'fetchUpdates' && deviceId) {
+      const result = handleFetchUpdates({deviceId: deviceId, action: 'fetchUpdates'});
+      const response = JSON.parse(result.getContent());
+      
+      if (callback) {
+        // JSONP response
+        return ContentService.createTextOutput(callback + '(' + JSON.stringify(response) + ');')
+          .setMimeType(ContentService.MimeType.JAVASCRIPT);
+      } else {
+        // Regular JSON response
+        return ContentService.createTextOutput(JSON.stringify(response))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({
+      success: true, 
+      message: 'Order Management Database API Active',
+      timestamp: new Date().toISOString(),
+      devices: getConnectedDevices().length
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false, 
+      error: error.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function handleSyncData(data) {
+  return handleSyncDataAdvanced(data);
+}
+
+function handleSyncDataAdvanced(data) {
+  const sheet = getOrCreateSheet('Orders');
+  const devicesSheet = getOrCreateSheet('Devices');
+  const deletedSheet = getOrCreateSheet('DeletedOrders');
+  
+  console.log('📥 ADVANCED sync data received:', data.action, 'from device:', data.deviceId);
+  
+  // ADVANCED order merging with conflict resolution
+  if (data.orders && data.orders.length > 0) {
+    const lastRow = sheet.getLastRow();
+    const headers = ['ID', 'Customer Name', 'Mobile', 'Product', 'Quantity', 'Unit Price', 'Total Amount', 'Status', 'Created At', 'Device ID', 'Last Updated', 'Sync Version'];
+    
+    // Ensure headers exist
+    if (lastRow === 0) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+    
+    // Get existing orders from sheet with advanced metadata
+    const existingOrders = {};
+    if (lastRow > 1) {
+      const existingData = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+      existingData.forEach((row, index) => {
+        if (row[0]) { // If ID exists
+          existingOrders[row[0]] = {
+            rowIndex: index + 2,
+            data: row,
+            lastUpdated: row[10] || row[8], // Use lastUpdated or createdAt
+            syncVersion: row[11] || 1
+          };
+        }
+      });
+    }
+    
+    // Process incoming orders with advanced conflict resolution
+    const newOrderRows = [];
+    const updatedRows = [];
+    let processedCount = 0;
+    
+    data.orders.forEach(order => {
+      const orderRow = [
+        order.id,
+        order.customerName,
+        order.customerMobile,
+        order.productName,
+        order.quantity,
+        order.unitPrice,
+        order.totalAmount,
+        order.status,
+        order.createdAt,
+        order.deviceId || data.deviceId,
+        order.lastUpdated || data.timestamp,
+        order.syncVersion || 1
+      ];
+      
+      const existingOrder = existingOrders[order.id];
+      
+      if (!existingOrder) {
+        // New order - add immediately
+        newOrderRows.push(orderRow);
+        processedCount++;
+        console.log('➕ New order added:', order.id);
+      } else {
+        // Advanced conflict resolution
+        const shouldUpdate = resolveOrderConflictServer(existingOrder, order, data);
+        
+        if (shouldUpdate) {
+          updatedRows.push({
+            rowIndex: existingOrder.rowIndex,
+            data: orderRow
+          });
+          processedCount++;
+          console.log('🔄 Order updated:', order.id);
+        }
+      }
+    });
+    
+    // Apply changes to sheet
+    if (newOrderRows.length > 0) {
+      const startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, newOrderRows.length, headers.length).setValues(newOrderRows);
+      console.log('✅ Added', newOrderRows.length, 'new orders');
+    }
+    
+    updatedRows.forEach(update => {
+      sheet.getRange(update.rowIndex, 1, 1, headers.length).setValues([update.data]);
+    });
+    
+    if (updatedRows.length > 0) {
+      console.log('✅ Updated', updatedRows.length, 'existing orders');
+    }
+  }
+  
+  // Update device info with advanced tracking
+  if (data.deviceInfo) {
+    updateDeviceInfoAdvanced(devicesSheet, data.deviceId, data.deviceInfo, data.timestamp);
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true, 
+    synced: data.orders?.length || 0,
+    processed: processedCount || 0,
+    timestamp: new Date().toISOString(),
+    syncId: data.syncId
+  }));
+}
+
+function resolveOrderConflictServer(existingOrder, newOrder, syncData) {
+  const existingTime = new Date(existingOrder.lastUpdated);
+  const newTime = new Date(newOrder.lastUpdated || syncData.timestamp);
+  
+  // Rule 1: Newer timestamp wins
+  if (newTime > existingTime) {
+    return true;
+  }
+  
+  // Rule 2: Same timestamp, higher sync version wins
+  if (newTime.getTime() === existingTime.getTime()) {
+    const existingVersion = existingOrder.syncVersion || 1;
+    const newVersion = newOrder.syncVersion || 1;
+    return newVersion > existingVersion;
+  }
+  
+  // Rule 3: High priority actions always win
+  if (syncData.priority === 'high' || syncData.priority === 'critical') {
+    return true;
+  }
+  
+  return false;
+}
+
+function updateDeviceInfoAdvanced(devicesSheet, deviceId, deviceInfo, timestamp) {
+  const lastRow = devicesSheet.getLastRow();
+  let deviceRow = -1;
+  
+  // Find existing device
+  for (let i = 2; i <= lastRow; i++) {
+    const existingId = devicesSheet.getRange(i, 1).getValue();
+    if (existingId === deviceId) {
+      deviceRow = i;
+      break;
+    }
+  }
+  
+  const deviceData = [
+    deviceId,
+    deviceInfo.name || 'Unknown Device',
+    deviceInfo.type || 'Unknown',
+    deviceInfo.browser || 'Unknown',
+    deviceInfo.registeredAt || timestamp,
+    timestamp,
+    'online',
+    deviceInfo.orderCount || 0,
+    deviceInfo.lastSync || timestamp
+  ];
+  
+  if (deviceRow > 0) {
+    // Update existing device
+    devicesSheet.getRange(deviceRow, 1, 1, 9).setValues([deviceData]);
+  } else {
+    // Add new device
+    devicesSheet.getRange(lastRow + 1, 1, 1, 9).setValues([deviceData]);
+  }
+}
+
+function handleDeleteOrder(data) {
+  return handleDeleteOrderAdvanced(data);
+}
+
+function handleDeleteOrderAdvanced(data) {
+  const sheet = getOrCreateSheet('Orders');
+  const deletedSheet = getOrCreateSheet('DeletedOrders');
+  
+  const orderId = data.orderId;
+  const lastRow = sheet.getLastRow();
+  
+  console.log('🗑️ ADVANCED DELETION: Processing order', orderId, 'from device', data.deviceId);
+  
+  // STEP 1: Find the order in main sheet
+  let deletedRowIndex = -1;
+  for (let i = 2; i <= lastRow; i++) {
+    const cellValue = sheet.getRange(i, 1).getValue();
+    if (cellValue === orderId) {
+      deletedRowIndex = i;
+      break;
+    }
+  }
+  
+  if (deletedRowIndex > 0) {
+    // STEP 2: Get the order data before processing
+    const orderData = sheet.getRange(deletedRowIndex, 1, 1, 12).getValues()[0];
+    
+    // STEP 3: First mark as DELETED in main sheet (for tracking)
+    sheet.getRange(deletedRowIndex, 8).setValue('DELETED'); // Status column
+    sheet.getRange(deletedRowIndex, 11).setValue(data.timestamp); // Last updated
+    
+    console.log('✅ Order marked as DELETED in database:', orderId);
+    
+    // STEP 4: Add to deleted orders sheet for permanent tracking
+    const deletedHeaders = ['ID', 'Customer Name', 'Mobile', 'Product', 'Quantity', 'Unit Price', 'Total Amount', 'Original Status', 'Created At', 'Device ID', 'Last Updated', 'Deleted At', 'Deleted By Device', 'Deletion Reason', 'Final Status'];
+    const deletedLastRow = deletedSheet.getLastRow();
+    
+    if (deletedLastRow === 0) {
+      deletedSheet.getRange(1, 1, 1, deletedHeaders.length).setValues([deletedHeaders]);
+    }
+    
+    // Add comprehensive deleted order record
+    const deletedOrderRow = [
+      orderData[0], // ID
+      orderData[1], // Customer Name
+      orderData[2], // Mobile
+      orderData[3], // Product
+      orderData[4], // Quantity
+      orderData[5], // Unit Price
+      orderData[6], // Total Amount
+      orderData[7], // Original Status (before deletion)
+      orderData[8], // Created At
+      orderData[9], // Device ID
+      orderData[10], // Last Updated
+      data.timestamp, // Deleted At
+      data.deviceId, // Deleted By Device
+      data.deletedOrder?.deletionReason || 'User deleted', // Deletion Reason
+      'PERMANENTLY_DELETED' // Final Status
+    ];
+    
+    deletedSheet.getRange(deletedLastRow + 1, 1, 1, deletedHeaders.length).setValues([deletedOrderRow]);
+    
+    console.log('✅ Order added to deleted orders tracking sheet:', orderId);
+    
+    // STEP 5: After marking and tracking, remove from main sheet
+    setTimeout(() => {
+      try {
+        sheet.deleteRow(deletedRowIndex);
+        console.log('✅ Order PERMANENTLY removed from main database:', orderId);
+      } catch (e) {
+        console.error('Error removing order from main sheet:', e);
+      }
+    }, 1000); // 1 second delay to ensure tracking is complete
+    
+    return ContentService.createTextOutput(JSON.stringify({
+      success: true, 
+      deleted: orderId,
+      markedAsDeleted: true,
+      trackedInDeletedSheet: true,
+      willBeRemovedFromMainSheet: true,
+      timestamp: data.timestamp
+    }));
+  } else {
+    console.log('❌ Order not found for deletion:', orderId);
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false, 
+      error: 'Order not found',
+      orderId: orderId
+    }));
+  }
+}
+
+function handleFetchUpdates(data) {
+  const sheet = getOrCreateSheet('Orders');
+  const deletedSheet = getOrCreateSheet('DeletedOrders');
+  const lastRow = sheet.getLastRow();
+  
+  const orders = [];
+  if (lastRow > 1) {
+    const range = sheet.getRange(2, 1, lastRow - 1, 11);
+    const values = range.getValues();
+    
+    values.forEach(row => {
+      if (row[0]) { // If ID exists
+        orders.push({
+          id: row[0],
+          customerName: row[1],
+          customerMobile: row[2],
+          productName: row[3],
+          quantity: row[4],
+          unitPrice: row[5],
+          totalAmount: row[6],
+          status: row[7],
+          createdAt: row[8],
+          deviceId: row[9],
+          lastUpdated: row[10]
+        });
+      }
+    });
+  }
+  
+  // Get recently deleted orders (last 24 hours)
+  const deletedOrders = [];
+  const deletedLastRow = deletedSheet.getLastRow();
+  if (deletedLastRow > 1) {
+    const deletedRange = deletedSheet.getRange(2, 1, deletedLastRow - 1, 13);
+    const deletedValues = deletedRange.getValues();
+    
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    
+    deletedValues.forEach(row => {
+      if (row[0] && row[11]) { // If ID and deleted timestamp exist
+        const deletedAt = new Date(row[11]);
+        if (deletedAt > oneDayAgo) {
+          deletedOrders.push(row[0]); // Just the order ID
+        }
+      }
+    });
+  }
+  
+  const devices = getConnectedDevices();
+  
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true, 
+    orders: orders,
+    deletedOrders: deletedOrders,
+    devices: devices,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+function handleRegisterDevice(data) {
+  const devicesSheet = getOrCreateSheet('Devices');
+  updateDeviceInfo(devicesSheet, data.device.id, data.device, new Date().toISOString());
+  
+  return ContentService.createTextOutput(JSON.stringify({success: true, registered: true}));
+}
+
+function handleHeartbeat(data) {
+  const devicesSheet = getOrCreateSheet('Devices');
+  const lastRow = devicesSheet.getLastRow();
+  
+  // Find and update device heartbeat
+  for (let i = 2; i <= lastRow; i++) {
+    const deviceId = devicesSheet.getRange(i, 1).getValue();
+    if (deviceId === data.deviceId) {
+      devicesSheet.getRange(i, 6).setValue(data.timestamp); // Update last seen
+      devicesSheet.getRange(i, 7).setValue('online'); // Update status
+      break;
+    }
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({success: true, heartbeat: true}));
+}
+
+function getOrCreateSheet(sheetName) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+    
+    if (sheetName === 'Orders') {
+      const headers = ['ID', 'Customer Name', 'Mobile', 'Product', 'Quantity', 'Unit Price', 'Total Amount', 'Status', 'Created At', 'Device ID', 'Last Updated'];
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    } else if (sheetName === 'Devices') {
+      const headers = ['Device ID', 'Name', 'Type', 'Browser', 'Registered At', 'Last Seen', 'Status'];
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    } else if (sheetName === 'DeletedOrders') {
+      const headers = ['ID', 'Customer Name', 'Mobile', 'Product', 'Quantity', 'Unit Price', 'Total Amount', 'Status', 'Created At', 'Device ID', 'Last Updated', 'Deleted At', 'Deleted By Device'];
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+  }
+  
+  return sheet;
+}
+
+function updateDeviceInfo(devicesSheet, deviceId, deviceInfo, timestamp) {
+  const lastRow = devicesSheet.getLastRow();
+  let deviceRow = -1;
+  
+  // Find existing device
+  for (let i = 2; i <= lastRow; i++) {
+    const existingId = devicesSheet.getRange(i, 1).getValue();
+    if (existingId === deviceId) {
+      deviceRow = i;
+      break;
+    }
+  }
+  
+  const deviceData = [
+    deviceId,
+    deviceInfo.name || 'Unknown Device',
+    deviceInfo.type || 'Unknown',
+    deviceInfo.browser || 'Unknown',
+    deviceInfo.registeredAt || timestamp,
+    timestamp,
+    'online'
+  ];
+  
+  if (deviceRow > 0) {
+    // Update existing device
+    devicesSheet.getRange(deviceRow, 1, 1, 7).setValues([deviceData]);
+  } else {
+    // Add new device
+    devicesSheet.getRange(lastRow + 1, 1, 1, 7).setValues([deviceData]);
+  }
+}
+
+function getConnectedDevices() {
+  const devicesSheet = getOrCreateSheet('Devices');
+  const lastRow = devicesSheet.getLastRow();
+  
+  if (lastRow <= 1) return [];
+  
+  const devices = [];
+  const range = devicesSheet.getRange(2, 1, lastRow - 1, 7);
+  const values = range.getValues();
+  
+  const now = new Date();
+  
+  values.forEach(row => {
+    if (row[0]) { // If device ID exists
+      const lastSeen = new Date(row[5]);
+      const minutesAgo = (now - lastSeen) / (1000 * 60);
+      const isOnline = minutesAgo < 2; // Consider online if seen within 2 minutes
+      
+      devices.push({
+        id: row[0],
+        name: row[1],
+        type: row[2],
+        browser: row[3],
+        registeredAt: row[4],
+        lastSeen: row[5],
+        status: isOnline ? 'online' : 'offline'
+      });
+    }
+  });
+  
+  return devices;
+}
+
+// Cleanup function to mark old devices as offline
+function cleanupDevices() {
+  const devicesSheet = getOrCreateSheet('Devices');
+  const lastRow = devicesSheet.getLastRow();
+  
+  if (lastRow <= 1) return;
+  
+  const now = new Date();
+  
+  for (let i = 2; i <= lastRow; i++) {
+    const lastSeen = new Date(devicesSheet.getRange(i, 6).getValue());
+    const minutesAgo = (now - lastSeen) / (1000 * 60);
+    
+    if (minutesAgo > 2) {
+      devicesSheet.getRange(i, 7).setValue('offline');
+    }
+  }
+}
+
+// Set up a trigger to run cleanup every minute
+function createCleanupTrigger() {
+  ScriptApp.newTrigger('cleanupDevices')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+}
+                        
